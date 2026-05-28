@@ -1,6 +1,7 @@
 from functools import wraps
-from flask import Blueprint, request, Response, current_app
-from simple_websocket import Server, ConnectionClosed
+
+from flask import Blueprint, current_app, request, Response
+from simple_websocket import ConnectionClosed, Server
 
 
 class Sock:
@@ -9,6 +10,7 @@ class Sock:
     :param app: The Flask application instance. If not provided, it must be
                 initialized later by calling the :func:`Sock.init_app` method.
     """
+
     def __init__(self, app=None):
         self.app = None
         self.bp = None
@@ -53,14 +55,18 @@ class Sock:
         :param kwargs: additional route options. See the Flask documentation
                        for the ``app.route`` decorator for details.
         """
+
         def decorator(f):
             if hasattr(f, '__flask_sock_routed__'):
                 websocket_route = f
             else:
+
                 @wraps(f)
                 def websocket_route(*args, **kwargs):
-                    ws = Server(request.environ, **current_app.config.get(
-                        'SOCK_SERVER_OPTIONS', {}))
+                    ws = Server(
+                        request.environ,
+                        **current_app.config.get('SOCK_SERVER_OPTIONS', {})
+                    )
                     try:
                         f(ws, *args, **kwargs)
                     except ConnectionClosed:
@@ -70,27 +76,7 @@ class Sock:
                     except:  # noqa: E722
                         pass
 
-                    class WebSocketResponse(Response):
-                        def __call__(self, *args, **kwargs):
-                            if ws.mode == 'eventlet':
-                                try:
-                                    from eventlet.wsgi import WSGI_LOCAL
-                                    ALREADY_HANDLED = []
-                                except ImportError:
-                                    from eventlet.wsgi import ALREADY_HANDLED
-                                    WSGI_LOCAL = None
-
-                                if hasattr(WSGI_LOCAL, 'already_handled'):
-                                    WSGI_LOCAL.already_handled = True
-                                return ALREADY_HANDLED
-                            elif ws.mode == 'gunicorn':
-                                raise StopIteration()
-                            elif ws.mode == 'werkzeug':
-                                return super().__call__(*args, **kwargs)
-                            else:
-                                return []
-
-                    return WebSocketResponse()
+                    return _ws_response(ws.mode)
 
             kwargs['websocket'] = True
             if bp:
@@ -107,3 +93,44 @@ class Sock:
             return websocket_route
 
         return decorator
+
+
+def _ws_response(ws_mode):
+    if ws_mode == 'eventlet':
+        return _EventletWebSocketResponse()
+    elif ws_mode == 'gunicorn':
+        return _GunicornWebSocketResponse()
+    elif ws_mode == 'werkzeug':
+        return _WerkzeugWebSocketResponse()
+    else:
+        return _NullWebSocketResponse()
+
+
+class _EventletWebSocketResponse(Response):
+    def __call__(self, environ, start_response):
+        try:
+            from eventlet.wsgi import WSGI_LOCAL
+
+            ALREADY_HANDLED = []
+        except ImportError:
+            from eventlet.wsgi import ALREADY_HANDLED
+
+            WSGI_LOCAL = None
+
+        if hasattr(WSGI_LOCAL, 'already_handled'):
+            WSGI_LOCAL.already_handled = True
+        return ALREADY_HANDLED
+
+
+class _GunicornWebSocketResponse(Response):
+    def __call__(self, environ, start_response):
+        raise StopIteration()
+
+
+class _WerkzeugWebSocketResponse(Response):
+    pass
+
+
+class _NullWebSocketResponse(Response):
+    def __call__(self, environ, start_response):
+        return []
